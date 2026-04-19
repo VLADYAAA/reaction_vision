@@ -6,32 +6,58 @@ import numpy as np
 import tempfile
 import os
 import json
+import math
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Настройка CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Инициализация компонентов MediaPipe
 BaseOptions = mp.tasks.BaseOptions
 FaceLandmarker = mp.tasks.vision.FaceLandmarker
 FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
+def rotation_matrix_to_euler(R):
+    """Конвертация матрицы вращения в углы Pitch, Yaw, Roll"""
+    sy = math.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
+    singular = sy < 1e-6
+    if not singular:
+        pitch = math.atan2(R[2,1] , R[2,2])
+        yaw = math.atan2(-R[2,0], sy)
+        roll = math.atan2(R[1,0], R[0,0])
+    else:
+        pitch = math.atan2(-R[1,2], R[1,1])
+        yaw = math.atan2(-R[2,0], sy)
+        roll = 0
+    return np.degrees(pitch), np.degrees(yaw), np.degrees(roll)
+
 @app.post("/analyze_reaction")
 async def analyze_reaction(
     video: UploadFile = File(...),
-    jumps_json: str = Form(...) # Список времен появления точки [t1, t2, t3...]
+    jumps_json: str = Form(...) 
 ):
     jump_times = json.loads(jumps_json)
     results = []
     
-    # Снижаем пороги для работы с "прикрытыми" глазами
+    # Конфигурация детектора с правильными именами атрибутов (facial)
     options = FaceLandmarkerOptions(
         base_options=BaseOptions(model_asset_path='face_landmarker.task'),
         running_mode=VisionRunningMode.VIDEO,
-        min_face_presence_confidence=0.3, # Более чувствительно к лицу
-        min_tracking_confidence=0.3
+        output_facial_transformation_matrixes=True, # ИСПРАВЛЕНО
+        min_face_presence_confidence=0.4,
+        min_tracking_confidence=0.4
     )
     
     with FaceLandmarker.create_from_options(options) as detector:
+        # Сохранение видео во временный файл
         with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_video:
             temp_video.write(await video.read())
             temp_video_path = temp_video.name
@@ -40,60 +66,91 @@ async def analyze_reaction(
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         frame_duration = 1000 / fps
         
-        # Сначала соберем все координаты зрачка из видео
-        frame_data = []
+        gaze_data = []
         frame_idx = 0
+        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
             
-            ts = int(frame_idx * frame_duration)
+            # MediaPipe требует монотонный timestamp
+            mp_timestamp = int(frame_idx * frame_duration)
             actual_time = cap.get(cv2.CAP_PROP_POS_MSEC)
             
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             
-            res = detector.detect_for_video(mp_image, ts)
-            if res.face_landmarks:
-                # Берем ирис (468) и углы глаза (33, 133) для калибровки
+            res = detector.detect_for_video(mp_image, mp_timestamp)
+            
+            # Проверка наличия лица и матрицы трансформации ( facial_... )
+            if res.face_landmarks and res.facial_transformation_matrixes: # ИСПРАВЛЕНО
+                # 1. Поворот головы (Head Pose)
+                matrix = res.facial_transformation_matrixes[0] # ИСПРАВЛЕНО
+                rotation_matrix = matrix[:3, :3]
+                head_pitch, head_yaw, head_roll = rotation_matrix_to_euler(rotation_matrix)
+                
+                # 2. Поворот зрачка относительно глаза
                 landmarks = res.face_landmarks[0]
-                iris_x = landmarks[468].x
-                # Относительная позиция (нормализация по ширине глаза)
-                # Это помогает ловить микродвижения
-                frame_data.append({"t": actual_time, "x": iris_x})
+                # Используем точки левого глаза: 33 (внешний), 133 (внутренний), 468 (ирис)
+                eye_outer = np.array([landmarks[33].x, landmarks[33].y])
+                eye_inner = np.array([landmarks[133].x, landmarks[133].y])
+                iris = np.array([landmarks[468].x, landmarks[468].y])
+                
+                eye_center = (eye_outer + eye_inner) / 2
+                eye_width = np.linalg.norm(eye_outer - eye_inner)
+                
+                # Коэффициент 60.0 переводит смещение в примерные градусы
+                eye_yaw_offset = ((iris[0] - eye_center[0]) / eye_width) * 60.0
+                eye_pitch_offset = ((iris[1] - eye_center[1]) / eye_width) * 60.0
+                
+                # 3. Итоговый вектор взгляда
+                gaze_data.append({
+                    "t": actual_time, 
+                    "yaw": head_yaw + eye_yaw_offset, 
+                    "pitch": head_pitch + eye_pitch_offset
+                })
             
             frame_idx += 1
+            
         cap.release()
-        os.remove(temp_video_path)
+        if os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
 
-        # Теперь для каждого прыжка ищем реакцию в собранных данных
+        # Анализ реакции на прыжки точки
         for jump_t in jump_times:
-            start_search = jump_t + 100 # Игнорируем первые 100мс (физически невозможно)
-            end_search = jump_t + 1000  # Ищем в окне 1 секунды
+            # Ищем движение в окне от 100мс до 1000мс после появления точки
+            start_search = jump_t + 100 
+            end_search = jump_t + 1000  
             
-            baseline_x = None
-            # Находим среднее положение ДО прыжка
-            prev_frames = [f['x'] for f in frame_data if jump_t - 200 < f['t'] < jump_t]
+            # Считаем базовое положение взгляда перед прыжком
+            prev_frames = [f for f in gaze_data if jump_t - 250 < f['t'] < jump_t]
             if prev_frames:
-                baseline_x = np.mean(prev_frames)
-            
-            if baseline_x:
-                for f in frame_data:
+                b_yaw = np.mean([f['yaw'] for f in prev_frames])
+                b_pitch = np.mean([f['pitch'] for f in prev_frames])
+                
+                for f in gaze_data:
                     if start_search < f['t'] < end_search:
-                        if abs(f['x'] - baseline_x) > 0.0025: # Очень высокая чувствительность
+                        # Разница векторов в градусах
+                        angular_shift = math.sqrt((f['yaw'] - b_yaw)**2 + (f['pitch'] - b_pitch)**2)
+                        
+                        # Если взгляд сдвинулся более чем на 2 градуса — это реакция
+                        if angular_shift > 2.0:
                             results.append(f['t'] - jump_t)
                             break
 
+    # Финальный расчет
     if not results:
-        return {"status": "fail", "message": "Движения не зафиксированы. Попробуйте лучше осветить лицо."}
+        return {"status": "fail", "message": "Вектор взгляда не зафиксировал четких движений."}
 
-    # Считаем среднее и фильтруем выбросы
-    avg_reaction = int(np.mean(results))
+    # Расчет индекса нистагма (дрожания) по первым 30 стабильным кадрам
+    nystagmus = round(np.std([f['yaw'] for f in gaze_data[:30]]), 3) if len(gaze_data) > 30 else 0
+
     return {
         "status": "success",
-        "average_ms": avg_reaction,
-        "all_reactions": results,
-        "count": len(results)
+        "average_ms": int(np.mean(results)),
+        "nystagmus_index": nystagmus,
+        "count": len(results),
+        "all_results": results
     }
 
 if __name__ == "__main__":

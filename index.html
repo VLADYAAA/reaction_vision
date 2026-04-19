@@ -45,7 +45,18 @@
                     const res = await fetch('http://localhost:8000/analyze_reaction', { method: 'POST', body: fd });
                     const data = await res.json();
                     if(data.status === 'success') {
-                        status.innerHTML = `Тест завершен!<br>Средняя реакция: <span style="color:#0f0">${data.average_ms} мс</span><br>Успешных замеров: ${data.count}/5`;
+                        status.innerHTML = `
+                            <b>Тест завершен!</b><br><br>
+                            Средняя скорость реакции вектора: <span style="color:#0f0">${data.average_ms} мс</span><br>
+                            Успешных саккад: ${data.count}/5<br>
+                            <br>
+                            <span style="color: #ff9900; font-size: 18px;">
+                                Индекс микродрожания (Нистагм): ${data.nystagmus_index} градусов
+                            </span><br>
+                            <span style="font-size: 14px; color: #aaa;">
+                                (У трезвого человека в покое этот индекс обычно ниже 0.5)
+                            </span>
+                        `;
                     } else {
                         status.innerText = data.message;
                     }
