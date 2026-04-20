@@ -2,98 +2,180 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Sober Test - Multi Jump</title>
+    <title>Sober Test Pro - Eye Tracking</title>
     <style>
-        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
-        #dot { 
-            position: absolute; width: 40px; height: 40px; background: radial-gradient(circle, #ff0000, #550000); 
-            border-radius: 50%; display: none; box-shadow: 0 0 30px #f00; z-index: 100;
+        body { 
+            margin: 0; 
+            background: #000; 
+            color: #fff; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            overflow: hidden; 
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
         }
-        #ui { position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        button { padding: 20px 40px; font-size: 24px; cursor: pointer; background: #007bff; color: #fff; border: none; border-radius: 10px; }
-        #status { font-size: 20px; margin-top: 20px; text-align: center; }
+        #dot { 
+            position: absolute; 
+            width: 45px; 
+            height: 45px; 
+            background: #fff; 
+            border-radius: 50%; 
+            display: none; 
+            box-shadow: 0 0 30px #fff; 
+            z-index: 100;
+            transition: background 0.3s;
+        }
+        #ui { 
+            text-align: center; 
+            background: rgba(20, 20, 20, 0.9); 
+            padding: 40px; 
+            border-radius: 20px; 
+            border: 1px solid #333;
+            max-width: 500px;
+        }
+        h1 { margin-top: 0; color: #007bff; }
+        #status { font-size: 18px; margin-bottom: 30px; color: #ccc; min-height: 50px; }
+        button { 
+            padding: 18px 36px; 
+            font-size: 20px; 
+            font-weight: bold;
+            cursor: pointer; 
+            background: #28a745; 
+            color: #fff; 
+            border: none; 
+            border-radius: 10px;
+            transition: transform 0.2s, background 0.2s;
+        }
+        button:hover { background: #218838; transform: scale(1.05); }
+        button:active { transform: scale(0.95); }
+        .result-val { font-size: 24px; color: #ffc107; font-weight: bold; }
+        #videoLink { display: block; margin-top: 20px; color: #17a2b8; text-decoration: none; font-weight: bold; }
+        #videoLink:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
+
     <div id="ui">
-        <button id="btn">Начать тест (5 прыжков)</button>
-        <div id="status">Держите голову неподвижно, следите только глазами</div>
+        <h1>Sober Test v3.0</h1>
+        <div id="status">Разрешите доступ к камере и расположите лицо по центру экрана.</div>
+        <button id="startBtn">НАЧАТЬ ТЕСТ</button>
     </div>
+
     <div id="dot"></div>
 
     <script>
-        const btn = document.getElementById('btn');
+        const startBtn = document.getElementById('startBtn');
         const dot = document.getElementById('dot');
         const status = document.getElementById('status');
+        const ui = document.getElementById('ui');
         
-        let recorder;
-        let chunks = [];
-        let jumps = [];
-        let startTime = 0;
+        let recorder, chunks = [], jumps = [], startTime;
 
-        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } }).then(stream => {
-            recorder = new MediaRecorder(stream);
-            recorder.ondataavailable = e => chunks.push(e.data);
+        // Инициализация камеры с настройками для высокого FPS и качества
+        navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                width: 1280, 
+                height: 720, 
+                frameRate: { ideal: 30 } 
+            } 
+        }).then(stream => {
+            // Настройка рекордера: высокий битрейт важен для четкости векторов
+            recorder = new MediaRecorder(stream, {
+                mimeType: 'video/webm;codecs=vp8',
+                videoBitsPerSecond: 6000000 // 6 Mbps
+            });
+
+            recorder.ondataavailable = e => {
+                if (e.data.size > 0) chunks.push(e.data);
+            };
+
             recorder.onstop = async () => {
-                status.innerText = "Идет глубокий анализ видео...";
-                const blob = new Blob(chunks, { type: 'video/webm' });
-                const fd = new FormData();
-                fd.append('video', blob);
-                fd.append('jumps_json', JSON.stringify(jumps));
+                status.innerHTML = "📡 Передача данных на сервер...<br>Обработка векторов и расчет нистагма.";
+                
+                const videoBlob = new Blob(chunks, { type: 'video/webm' });
+                const formData = new FormData();
+                formData.append('video', videoBlob, 'test.webm');
+                formData.append('jumps_json', JSON.stringify(jumps));
 
                 try {
-                    const res = await fetch('http://localhost:8000/analyze_reaction', { method: 'POST', body: fd });
-                    const data = await res.json();
-                    if(data.status === 'success') {
+                    const response = await fetch('http://127.0.0.1:8000/analyze_reaction', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.status === 'success') {
                         status.innerHTML = `
-                            <b>Тест завершен!</b><br><br>
-                            Средняя скорость реакции вектора: <span style="color:#0f0">${data.average_ms} мс</span><br>
-                            Успешных саккад: ${data.count}/5<br>
-                            <br>
-                            <span style="color: #ff9900; font-size: 18px;">
-                                Индекс микродрожания (Нистагм): ${data.nystagmus_index} градусов
-                            </span><br>
-                            <span style="font-size: 14px; color: #aaa;">
-                                (У трезвого человека в покое этот индекс обычно ниже 0.5)
-                            </span>
+                            <p>Реакция: <span class="result-val">${data.average_ms} мс</span></p>
+                            <p>Нистагм (дрожание): <span class="result-val">${data.nystagmus_index}</span></p>
+                            <p>Успешных тестов: ${data.count} из 5</p>
+                            <a id="videoLink" href="http://127.0.0.1:8000${data.video_url}" target="_blank">📥 СКАЧАТЬ ВИДЕО РАЗБОРА</a>
                         `;
                     } else {
-                        status.innerText = data.message;
+                        status.innerText = "Ошибка: " + data.message;
                     }
-                } catch(e) { status.innerText = "Ошибка сервера"; }
-                btn.style.display = 'block';
+                } catch (err) {
+                    status.innerText = "Ошибка сервера. Убедитесь, что api.py запущен.";
+                }
+                ui.style.display = 'block';
             };
+        }).catch(err => {
+            status.innerText = "Камера не найдена или доступ запрещен.";
+            startBtn.disabled = true;
         });
 
-        btn.onclick = async () => {
-            if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
-            btn.style.display = 'none';
-            chunks = [];
+        startBtn.onclick = async () => {
+            ui.style.display = 'none';
+            chunks = []; 
             jumps = [];
             
             recorder.start();
             startTime = performance.now();
-            status.innerText = "Внимание...";
 
-            // Цикл из 5 прыжков
+            // --- 1. ФАЗА КАЛИБРОВКИ ---
+            // Пользователь должен смотреть строго в центр 2 секунды
+            dot.style.background = "yellow";
+            dot.style.left = "50%";
+            dot.style.top = "50%";
+            dot.style.transform = "translate(-50%, -50%)";
+            dot.style.display = "block";
+            
+            // Ждем 2.5 секунды для накопления кадров калибровки
+            await new Promise(r => setTimeout(r, 2500));
+            
+            dot.style.background = "red";
+            dot.style.transform = "none"; // Убираем центрирование для прыжков
+
+            // --- 2. ФАЗА ТЕСТА (5 прыжков) ---
             for(let i = 0; i < 5; i++) {
-                await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
+                // Случайная пауза перед прыжком
+                await new Promise(r => setTimeout(r, 1200 + Math.random() * 1000));
                 
-                const x = 10 + Math.random() * 80;
-                const y = 10 + Math.random() * 80;
-                dot.style.left = x + '%';
-                dot.style.top = y + '%';
-                dot.style.display = 'block';
+                // Координаты: сильно разносим по краям (10-20% или 80-90%)
+                const xPct = Math.random() > 0.5 ? (10 + Math.random() * 10) : (80 + Math.random() * 10);
+                const yPct = 20 + Math.random() * 60;
                 
-                jumps.push(performance.now() - startTime);
+                dot.style.left = xPct + '%';
+                dot.style.top = yPct + '%';
                 
-                await new Promise(r => setTimeout(r, 800));
-                dot.style.display = 'none';
-                status.innerText = `Прыжок ${i+1} из 5`;
+                // Логируем время и координаты (теперь передаем X и Y для отрисовки целей)
+                jumps.push({ 
+                    t: performance.now() - startTime, 
+                    x: xPct / 100, 
+                    y: yPct / 100 
+                });
+
+                // Ждем фиксации взгляда
+                await new Promise(r => setTimeout(r, 900));
             }
 
-            recorder.stop();
-            if (document.exitFullscreen) document.exitFullscreen();
+            // Небольшая пауза после последнего прыжка и стоп
+            setTimeout(() => {
+                dot.style.display = "none";
+                recorder.stop();
+            }, 300);
         };
     </script>
 </body>
